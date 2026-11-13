@@ -127,6 +127,11 @@ def run_flower_fedavg_simulation(
     eval_model = create_model(input_dim=input_dim)
     criterion = torch.nn.BCELoss()
 
+    # Variables to track best validation checkpoint
+    best_val_auc = -1.0
+    best_parameters = [p.copy() for p in current_parameters]
+    best_round = 1
+
     # Communication rounds loop
     for rnd in range(1, num_rounds + 1):
         fit_results = []
@@ -137,7 +142,6 @@ def run_flower_fedavg_simulation(
                 current_parameters,
                 {"local_epochs": str(local_epochs)}
             )
-
             fit_res = FitRes(
                 status=Status(Code.OK, "Success"),
                 parameters=ndarrays_to_parameters(updated_params),
@@ -167,6 +171,12 @@ def run_flower_fedavg_simulation(
         history["f1"].append(round_metrics["f1"])
         history["brier"].append(round_metrics["brier"])
 
+        # Track best model checkpoint based on validation AUC
+        if round_metrics["auc"] > best_val_auc:
+            best_val_auc = round_metrics["auc"]
+            best_parameters = [p.copy() for p in current_parameters]
+            best_round = rnd
+
         if rnd == 1 or rnd % 5 == 0 or rnd == num_rounds:
             print(
                 f"Round {rnd:>2}/{num_rounds:>2} | "
@@ -176,12 +186,14 @@ def run_flower_fedavg_simulation(
                 f"Brier: {round_metrics['brier']:.4f}"
             )
 
-    # Save final model weights
-    set_parameters(eval_model, current_parameters)
+    print(f"\n[Federated Checkpoint] Selected best global model from Round {best_round} (Val AUC: {best_val_auc:.4f})")
+
+    # Save best model weights
+    set_parameters(eval_model, best_parameters)
     os.makedirs(os.path.dirname(model_output_path), exist_ok=True)
     torch.save(eval_model.state_dict(), model_output_path)
 
-    # Final Evaluation on unseen global test set
+    # Final Evaluation on unseen global test set using best checkpoint
     df_test = pd.read_csv(test_path)
     x_test = torch.tensor(df_test.drop(columns=["live_birth"]).values.astype(np.float32))
     y_test = df_test["live_birth"].values.astype(np.float32)
@@ -197,6 +209,7 @@ def run_flower_fedavg_simulation(
         "history": history,
         "final_test_metrics": test_metrics,
         "best_val_auc": float(max(history["auc"])),
+        "best_round": best_round,
         "num_rounds": num_rounds,
         "num_clients": num_clients
     }
@@ -212,7 +225,7 @@ def run_flower_fedavg_simulation(
     print(f"Final F1:          {test_metrics['f1']:.4f}")
     print(f"Final Brier Score: {test_metrics['brier']:.4f}")
     print(f"Accuracy:          {test_metrics['accuracy']:.4f}")
-    print(f"Best Val AUC:      {max(history['auc']):.4f}")
+    print(f"Best Val AUC:      {max(history['auc']):.4f} (Round {best_round})")
     print("=" * 35)
 
     return output_record

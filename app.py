@@ -34,11 +34,12 @@ preprocessor = None
 model = None
 schema = None
 test_auc_str = "0.647"
+model_info = {}
 
 
 def load_artifacts():
     """Load model, preprocessor, and schema at app startup."""
-    global preprocessor, model, schema, test_auc_str
+    global preprocessor, model, schema, test_auc_str, model_info
 
     if os.path.exists(PREPROCESSOR_PATH):
         preprocessor = joblib.load(PREPROCESSOR_PATH)
@@ -49,11 +50,12 @@ def load_artifacts():
         with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
             schema = json.load(f)
 
+    metrics_data = {}
     if os.path.exists(METRICS_PATH):
         try:
             with open(METRICS_PATH, "r", encoding="utf-8") as f:
-                d = json.load(f)
-                test_auc_str = f"{d['final_test_metrics']['auc']:.3f}"
+                metrics_data = json.load(f)
+                test_auc_str = f"{metrics_data['final_test_metrics']['auc']:.3f}"
         except Exception:
             pass
 
@@ -62,6 +64,30 @@ def load_artifacts():
     if os.path.exists(MODEL_PATH):
         model.load_state_dict(torch.load(MODEL_PATH, map_location="cpu", weights_only=True))
     model.eval()
+
+    # Build model transparency info
+    fm = metrics_data.get("final_test_metrics", {})
+    model_info = {
+        "version": "v1.0 — FedAvg",
+        "algorithm": "Federated Averaging (FedAvg)",
+        "framework": "Flower (flwr) + PyTorch",
+        "num_rounds": metrics_data.get("num_rounds", 30),
+        "num_clients": metrics_data.get("num_clients", 10),
+        "n_samples_total": schema.get("n_samples_total", "N/A") if schema else "N/A",
+        "n_train": schema.get("n_train", "N/A") if schema else "N/A",
+        "n_val": schema.get("n_val", "N/A") if schema else "N/A",
+        "n_test": schema.get("n_test", "N/A") if schema else "N/A",
+        "positive_rate": f"{schema.get('positive_rate', 0) * 100:.1f}%" if schema else "N/A",
+        "n_features": schema.get("n_features_processed", "N/A") if schema else "N/A",
+        "dataset_source": "Freeze-All IVF Cohort (Published)",
+        "test_auc": f"{fm.get('auc', 0):.3f}",
+        "test_f1": f"{fm.get('f1', 0):.3f}",
+        "test_accuracy": f"{fm.get('accuracy', 0) * 100:.1f}%",
+        "test_brier": f"{fm.get('brier', 0):.4f}",
+        "best_val_auc": f"{metrics_data.get('best_val_auc', 0):.3f}",
+        "privacy_method": "No raw data shared — weights only",
+        "leakage_guard": "Pregnancy Rate (PR) excluded",
+    }
 
 
 def predict_probability(input_dict: dict) -> float:
@@ -88,12 +114,15 @@ def predict_probability(input_dict: dict) -> float:
 @app.route("/", methods=["GET"])
 def index():
     """Render home page with input form and default values."""
-    defaults = schema.get("default_values", {}) if schema else {}
+    defaults = schema.get("default_values", {}).copy() if schema else {}
+    if "age" in defaults:
+        defaults["age"] = int(round(float(defaults["age"])))
     return render_template(
         "index.html",
         values=defaults,
         prob_pct=55.2,
-        test_auc=test_auc_str
+        test_auc=test_auc_str,
+        model_info=model_info
     )
 
 
@@ -102,11 +131,13 @@ def predict_ui():
     """Handle form submission and render predicted probability."""
     form_data = request.form.to_dict()
 
-    # Cast numeric values
+    # Cast numeric values (age is always a whole integer)
     clean_inputs = {}
     for k, v in form_data.items():
         try:
-            if "." in v:
+            if k == "age":
+                clean_inputs[k] = int(float(v))  # force whole integer
+            elif "." in v:
                 clean_inputs[k] = float(v)
             else:
                 clean_inputs[k] = int(v)
@@ -116,11 +147,16 @@ def predict_ui():
     prob = predict_probability(clean_inputs)
     prob_pct = round(prob * 100, 1)
 
+    # Ensure age is always an integer when passed back to the template
+    if "age" in clean_inputs:
+        clean_inputs["age"] = int(clean_inputs["age"])
+
     return render_template(
         "index.html",
         values=clean_inputs,
         prob_pct=prob_pct,
-        test_auc=test_auc_str
+        test_auc=test_auc_str,
+        model_info=model_info
     )
 
 
